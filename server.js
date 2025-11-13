@@ -9,18 +9,18 @@ dotenv.config();
 // ================== БАЗОВАЯ НАСТРОЙКА ==================
 const app = express();
 
-// какие источники (сайты) могут слать запросы к серверу
+// какие источники могут слать запросы к серверу
 const allowedOrigins = [
   "http://localhost:4173",
   "http://localhost:5173",
   "https://tranquil-scone-233ac7.netlify.app",
-  "https://avidcarpetcleaning.com",            // <– добавили боевой домен
+  "https://avidcarpetcleaning.com",        // твой домен
+  "https://www.avidcarpetcleaning.com",
 ];
 
 app.use(
   cors({
     origin(origin, callback) {
-      // origin может быть undefined, если ты сам тестируешь из постмана и т.п.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
@@ -41,29 +41,27 @@ const upload = multer({
   },
 });
 
-// ------------ Конфиг для отправки почты через Resend -----
+// ------------ Конфиг для Resend -------------------------
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-
-// кто ПОЛУЧАЕТ заявки (может быть Gmail)
 const ADMIN_EMAIL =
   process.env.ADMIN_EMAIL ||
   process.env.MAIL_USER ||
-  "avidcleaningpa@gmail.com";
+  "bookings@avidcarpetcleaning.com"; // можно поменять на любой рабочий
 
-// кто ОТПРАВЛЯЕТ (должен быть на твоём домене)
-const SENDER_EMAIL =
-  process.env.SENDER_EMAIL || "booking@avidcarpetcleaning.com";
+if (!RESEND_API_KEY) {
+  console.warn("⚠️ RESEND_API_KEY не задан в переменных окружения");
+}
 
-// хелпер: отправка письма через Resend API
+// ---------- Письмо админу (с фотками) ----------
 async function sendBookingEmail({ client, html, attachments }) {
   if (!RESEND_API_KEY) {
     throw new Error("Missing RESEND_API_KEY env variable");
   }
 
   const payload = {
-    from: `Avid Carpet Cleaning <${SENDER_EMAIL}>`, // отправитель с твоего домена
-    to: [ADMIN_EMAIL],                              // получатель — твоя gmail
-    reply_to: client.email,                         // "Ответить" — на клиента
+    from: `Avid Carpet Cleaning <${ADMIN_EMAIL}>`,
+    to: [ADMIN_EMAIL],                // куда приходит заявка
+    reply_to: client.email,           // ответить можно клиенту
     subject: `New booking from ${client.name}`,
     html,
     attachments: attachments.map((file) => ({
@@ -84,17 +82,50 @@ async function sendBookingEmail({ client, html, attachments }) {
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("Resend API error:", data);
-    throw new Error(data.message || "Resend API error");
+    console.error("Resend API error (admin):", data);
+    throw new Error(data.message || "Resend API error (admin)");
   }
 
-  console.log("Mail sent via Resend:", data);
+  console.log("Mail sent via Resend (admin):", data);
+  return data;
+}
+
+// ---------- Письмо клиенту (без фоток) ----------
+async function sendClientConfirmationEmail({ client, summaryHtml }) {
+  if (!RESEND_API_KEY) {
+    throw new Error("Missing RESEND_API_KEY env variable");
+  }
+
+  const payload = {
+    from: `Avid Carpet Cleaning <${ADMIN_EMAIL}>`,
+    to: [client.email],                        // клиент
+    subject: "We received your booking request",
+    html: summaryHtml,
+  };
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("Resend API error (client):", data);
+    throw new Error(data.message || "Resend API error (client)");
+  }
+
+  console.log("Mail sent via Resend (client):", data);
   return data;
 }
 
 // ================== РОУТЫ ==================
 
-// health-check, чтобы видеть "Avid API is running"
+// health-check
 app.get("/", (req, res) => {
   res.send("Avid API is running");
 });
@@ -116,15 +147,15 @@ app.post("/api/booking", upload.array("photos", 10), async (req, res) => {
       filesCount: files.length,
     });
 
-    // простая проверка обязательных полей
+    // проверка обязательных полей
     if (!name || !email || !address || !phone || !service || !items) {
       return res
         .status(400)
         .json({ success: false, error: "Missing required fields" });
     }
 
-    // HTML-содержимое письма
-    const html = `
+    // HTML для письма админу
+    const adminHtml = `
       <h2>New Booking Request</h2>
       <p><b>Name:</b> ${name}</p>
       <p><b>Email:</b> ${email}</p>
@@ -136,11 +167,30 @@ app.post("/api/booking", upload.array("photos", 10), async (req, res) => {
       <p><b>Photos attached:</b> ${files.length}</p>
     `;
 
-    // отправляем письмо через Resend
+    // HTML для письма клиенту
+    const clientHtml = `
+      <h2>Thank you, ${name}!</h2>
+      <p>We’ve received your booking request and will get back to you within a few hours.</p>
+      <h3>Summary of your request:</h3>
+      <p><b>Service:</b> ${service}</p>
+      <p><b>Items:</b> ${items}</p>
+      <p><b>Address:</b> ${address}</p>
+      <p><b>Phone:</b> ${phone}</p>
+      <p><b>Additional comments:</b> ${comments || "-"}</p>
+      <p>If you didn’t make this request, please reply to this email.</p>
+    `;
+
+    // 1) письмо админу
     await sendBookingEmail({
       client: { name, email },
-      html,
+      html: adminHtml,
       attachments: files,
+    });
+
+    // 2) письмо клиенту
+    await sendClientConfirmationEmail({
+      client: { name, email },
+      summaryHtml: clientHtml,
     });
 
     // ответ фронту
