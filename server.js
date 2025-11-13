@@ -1,69 +1,104 @@
 // server.js
+import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import nodemailer from "nodemailer";
-import dotenv from "dotenv";
 
 dotenv.config();
 
+// ================== БАЗОВАЯ НАСТРОЙКА ==================
 const app = express();
-const PORT = process.env.PORT || 10000;
 
-// ---------- CORS ----------
-app.use(cors());
-app.options("*", cors());
+// какие источники (сайты) могут слать запросы к серверу
+const allowedOrigins = [
+  "http://localhost:4173",
+  "http://localhost:5173",
+  "https://tranquil-scone-233ac7.netlify.app",
+];
 
-// ---------- Парсинг тела + загрузка файлов в память ----------
+app.use(
+  cors({
+    origin(origin, callback) {
+      // origin может быть undefined, если ты сам тестируешь из постмана и т.п.
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"));
+    },
+  })
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ------------ Multer: загрузка фото в память -------------
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    files: 10,
-    fileSize: 10 * 1024 * 1024, // 10 MB
+    fileSize: 10 * 1024 * 1024, // до 10 МБ на файл
+    files: 10,                  // до 10 файлов
   },
 });
 
-// ---------- health / тест ----------
+// ------------ Конфиг для отправки почты через Resend -----
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const ADMIN_EMAIL =
+  process.env.ADMIN_EMAIL ||
+  process.env.MAIL_USER || // на всякий случай
+  "avidcleaningpa@gmail.com";
+
+// хелпер: отправка письма через Resend API
+async function sendBookingEmail({ client, html, attachments }) {
+  if (!RESEND_API_KEY) {
+    throw new Error("Missing RESEND_API_KEY env variable");
+  }
+
+  const payload = {
+    from: `Avid Carpet Cleaning <${ADMIN_EMAIL}>`, // отправитель
+    to: [ADMIN_EMAIL],                            // куда приходят заявки
+    reply_to: client.email,                       // "Ответить" — на клиента
+    subject: `New booking from ${client.name}`,
+    html,
+    attachments: attachments.map((file) => ({
+      filename: file.originalname,
+      content: file.buffer.toString("base64"), // Resend ждёт base64
+    })),
+  };
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("Resend API error:", data);
+    throw new Error(data.message || "Resend API error");
+  }
+
+  console.log("Mail sent via Resend:", data);
+  return data;
+}
+
+// ================== РОУТЫ ==================
+
+// health-check, чтобы видеть "Avid API is running"
 app.get("/", (req, res) => {
   res.send("Avid API is running");
 });
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
-
-// ---------- Настройки почты ----------
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
-const MAIL_USER = process.env.MAIL_USER;
-const MAIL_PASS = process.env.MAIL_PASS;
-
-if (!ADMIN_EMAIL || !MAIL_USER || !MAIL_PASS) {
-  console.error("🚨 ENV ERROR: ADMIN_EMAIL / MAIL_USER / MAIL_PASS not set");
-}
-
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  auth: {
-    user: MAIL_USER,
-    pass: MAIL_PASS,
-  },
-});
-
-// ---------- Основной маршрут бронирования ----------
+// основной роут с формы
 app.post("/api/booking", upload.array("photos", 10), async (req, res) => {
-  const startTime = Date.now();
   try {
-    console.log("📩 New booking request:", {
-      email: req.body.email,
-      name: req.body.name,
-    });
+    const { name, email, address, phone, service, items, comments } = req.body;
+    const files = req.files || [];
 
-    const {
+    console.log("New booking request:", {
       name,
       email,
       address,
@@ -71,87 +106,50 @@ app.post("/api/booking", upload.array("photos", 10), async (req, res) => {
       service,
       items,
       comments,
-    } = req.body;
-
-    const attachments = (req.files || []).map((file, index) => {
-      const ext = (file.mimetype && file.mimetype.split("/")[1]) || "jpg";
-      return {
-        filename: `photo-${index + 1}.${ext}`,
-        content: file.buffer,
-        contentType: file.mimetype,
-      };
+      filesCount: files.length,
     });
 
-    const plainText = `
-New booking request
+    // простая проверка обязательных полей
+    if (!name || !email || !address || !phone || !service || !items) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing required fields" });
+    }
 
-Name: ${name}
-Email: ${email}
-Address: ${address}
-Phone: ${phone}
-Service type: ${service}
-
-Items to clean:
-${items}
-
-Additional comments:
-${comments || "—"}
-
-Attached photos: ${attachments.length}
-`.trim();
-
-    const htmlBody = `
-      <h2>New booking request</h2>
+    // HTML-содержимое письма
+    const html = `
+      <h2>New Booking Request</h2>
       <p><b>Name:</b> ${name}</p>
       <p><b>Email:</b> ${email}</p>
-      <p><b>Address:</b> ${address}</p>
       <p><b>Phone:</b> ${phone}</p>
-      <p><b>Service type:</b> ${service}</p>
-      <p><b>Items to clean:</b><br>${(items || "")
-        .replace(/\n/g, "<br>")}</p>
-      <p><b>Additional comments:</b><br>${(comments || "—")
-        .replace(/\n/g, "<br>")}</p>
-      <p><b>Photos attached:</b> ${attachments.length}</p>
+      <p><b>Address:</b> ${address}</p>
+      <p><b>Service:</b> ${service}</p>
+      <p><b>Items:</b> ${items}</p>
+      <p><b>Comments:</b> ${comments || "-"}</p>
+      <p><b>Photos attached:</b> ${files.length}</p>
     `;
 
-    const mailOptions = {
-      from: `"Avid Carpet Cleaning" <${MAIL_USER}>`,
-      to: ADMIN_EMAIL,
-      replyTo: email,
-      subject: `New booking from ${name || "client"}`,
-      text: plainText,
-      html: htmlBody,
-      attachments,
-    };
-
-    // === ОТПРАВКА ПИСЬМА В ФОНЕ ===
-    transporter
-      .sendMail(mailOptions)
-      .then(info => {
-        console.log(
-          "✅ Mail sent:",
-          info.messageId,
-          "in",
-          Date.now() - startTime,
-          "ms"
-        );
-      })
-      .catch(err => {
-        console.error("❌ Mail send error:", err);
-      });
-
-    // === ОТВЕТ КЛИЕНТУ СРАЗУ, НЕ ЖДЁМ SMTP ===
-    res.json({ success: true });
-  } catch (err) {
-    console.error("❌ Booking error:", err);
-    res.status(500).json({
-      success: false,
-      error: err.message || "Unknown server error",
+    // отправляем письмо через Resend
+    await sendBookingEmail({
+      client: { name, email },
+      html,
+      attachments: files,
     });
+
+    // ответ фронту
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Booking error:", err);
+    return res
+      .status(500)
+      .json({ success: false, error: err.message || "Mail error" });
   }
 });
 
-// ---------- Старт сервера ----------
+// ================== ЗАПУСК СЕРВЕРА ==================
+const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
   console.log(`Server started on port ${PORT}`);
+  console.log("Your service is live 🚀");
 });
