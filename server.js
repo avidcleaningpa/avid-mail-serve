@@ -14,6 +14,7 @@ const allowedOrigins = [
   "http://localhost:4173",
   "http://localhost:5173",
   "https://tranquil-scone-233ac7.netlify.app",
+  "https://avidcarpetcleaning.com",            // <– добавили боевой домен
 ];
 
 app.use(
@@ -42,10 +43,16 @@ const upload = multer({
 
 // ------------ Конфиг для отправки почты через Resend -----
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
+
+// кто ПОЛУЧАЕТ заявки (может быть Gmail)
 const ADMIN_EMAIL =
   process.env.ADMIN_EMAIL ||
-  process.env.MAIL_USER || // на всякий случай
+  process.env.MAIL_USER ||
   "avidcleaningpa@gmail.com";
+
+// кто ОТПРАВЛЯЕТ (должен быть на твоём домене)
+const SENDER_EMAIL =
+  process.env.SENDER_EMAIL || "booking@avidcarpetcleaning.com";
 
 // хелпер: отправка письма через Resend API
 async function sendBookingEmail({ client, html, attachments }) {
@@ -54,9 +61,9 @@ async function sendBookingEmail({ client, html, attachments }) {
   }
 
   const payload = {
-    from: `Avid Carpet Cleaning <${ADMIN_EMAIL}>`, // отправитель
-    to: [ADMIN_EMAIL],                            // куда приходят заявки
-    reply_to: client.email,                       // "Ответить" — на клиента
+    from: `Avid Carpet Cleaning <${SENDER_EMAIL}>`, // отправитель с твоего домена
+    to: [ADMIN_EMAIL],                              // получатель — твоя gmail
+    reply_to: client.email,                         // "Ответить" — на клиента
     subject: `New booking from ${client.name}`,
     html,
     attachments: attachments.map((file) => ({
