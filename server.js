@@ -10,7 +10,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ---------- CORS (разрешаем всем, чтобы не было блокировок в браузере) ----------
+// ---------- CORS ----------
 app.use(cors());
 app.options("*", cors());
 
@@ -22,21 +22,20 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     files: 10,
-    fileSize: 10 * 1024 * 1024, // 10 MB на фото
+    fileSize: 10 * 1024 * 1024, // 10 MB
   },
 });
 
-// ---------- Тестовый маршрут для проверки, что API жив ----------
+// ---------- health / тест ----------
 app.get("/", (req, res) => {
   res.send("Avid API is running");
 });
 
-// Доп. health-маршрут (можно пинговать без ошибок в консоли)
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// ---------- Нодмейлер через Gmail ----------
+// ---------- Настройки почты ----------
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 const MAIL_USER = process.env.MAIL_USER;
 const MAIL_PASS = process.env.MAIL_PASS;
@@ -74,7 +73,6 @@ app.post("/api/booking", upload.array("photos", 10), async (req, res) => {
       comments,
     } = req.body;
 
-    // Собираем вложения из загруженных фото
     const attachments = (req.files || []).map((file, index) => {
       const ext = (file.mimetype && file.mimetype.split("/")[1]) || "jpg";
       return {
@@ -126,25 +124,23 @@ Attached photos: ${attachments.length}
       attachments,
     };
 
-    // Отправляем письмо, но не даём подвиснуть бесконечно
-    const sendPromise = transporter.sendMail(mailOptions);
+    // === ОТПРАВКА ПИСЬМА В ФОНЕ ===
+    transporter
+      .sendMail(mailOptions)
+      .then(info => {
+        console.log(
+          "✅ Mail sent:",
+          info.messageId,
+          "in",
+          Date.now() - startTime,
+          "ms"
+        );
+      })
+      .catch(err => {
+        console.error("❌ Mail send error:", err);
+      });
 
-    // Ограничиваем ожидание, чтобы всегда ответить клиенту
-    const MAIL_TIMEOUT = 20000; // 20 секунд
-    await Promise.race([
-      sendPromise,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Mail timeout")), MAIL_TIMEOUT)
-      ),
-    ]);
-
-    console.log(
-      "✅ Booking processed in",
-      Date.now() - startTime,
-      "ms"
-    );
-
-    // ВАЖНО: всегда отвечаем JSON, иначе фронт будет висеть
+    // === ОТВЕТ КЛИЕНТУ СРАЗУ, НЕ ЖДЁМ SMTP ===
     res.json({ success: true });
   } catch (err) {
     console.error("❌ Booking error:", err);
