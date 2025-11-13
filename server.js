@@ -10,138 +10,152 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ---- CORS ----
-const allowedOrigins = [
-  "http://localhost:4173",
-  "http://localhost:5173",
-  "https://tranquil-scene-233ac7.netlify.app"
-];
+// ---------- CORS (разрешаем всем, чтобы не было блокировок в браузере) ----------
+app.use(cors());
+app.options("*", cors());
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // На всякий случай, чтобы запросы без origin (например, из Postman) тоже проходили
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"));
-    }
-  })
-);
-
-// Чтобы парсить JSON без файлов (на всякий случай)
+// ---------- Парсинг тела + загрузка файлов в память ----------
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ---- Multer: файлы в память ----
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10 MB на файл
-    files: 10
-  }
+    files: 10,
+    fileSize: 10 * 1024 * 1024, // 10 MB на фото
+  },
 });
 
-// ---- Nodemailer ----
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.MAIL_USER,
-    pass: process.env.MAIL_PASS
-  }
-});
-
-// простая проверка, что API жив
+// ---------- Тестовый маршрут для проверки, что API жив ----------
 app.get("/", (req, res) => {
   res.send("Avid API is running");
 });
 
-// ---- Основной маршрут бронирования ----
+// Доп. health-маршрут (можно пинговать без ошибок в консоли)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// ---------- Нодмейлер через Gmail ----------
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const MAIL_USER = process.env.MAIL_USER;
+const MAIL_PASS = process.env.MAIL_PASS;
+
+if (!ADMIN_EMAIL || !MAIL_USER || !MAIL_PASS) {
+  console.error("🚨 ENV ERROR: ADMIN_EMAIL / MAIL_USER / MAIL_PASS not set");
+}
+
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+  auth: {
+    user: MAIL_USER,
+    pass: MAIL_PASS,
+  },
+});
+
+// ---------- Основной маршрут бронирования ----------
 app.post("/api/booking", upload.array("photos", 10), async (req, res) => {
+  const startTime = Date.now();
   try {
-    const {
-      serviceType,
-      serviceDate,
-      serviceTime,
-      firstName,
-      lastName,
-      phone,
-      email,
-      address,
-      itemsToClean,
-      additionalComments
-    } = req.body;
-
-    // Куда отправляем заявки
-    const adminEmail = process.env.ADMIN_EMAIL || process.env.MAIL_USER;
-
-    // Текст письма для администратора
-    const adminText = `
-New booking request:
-
-Service type: ${serviceType || "-"}
-Preferred date: ${serviceDate || "-"}
-Preferred time: ${serviceTime || "-"}
-
-Name: ${firstName || ""} ${lastName || ""}
-Phone: ${phone || "-"}
-Email: ${email || "-"}
-
-Address:
-${address || "-"}
-
-Items to clean:
-${itemsToClean || "-"}
-
-Additional comments:
-${additionalComments || "-"}
-    `;
-
-    // прикрепляем файлы (если есть)
-    const attachments =
-      (req.files || []).map((file) => ({
-        filename: file.originalname || "photo.jpg",
-        content: file.buffer
-      })) || [];
-
-    // ---- письмо админу ----
-    await transporter.sendMail({
-      from: `"Avid Carpet Cleaning" <${process.env.MAIL_USER}>`,
-      to: adminEmail,
-      subject: "New booking request",
-      text: adminText,
-      attachments
+    console.log("📩 New booking request:", {
+      email: req.body.email,
+      name: req.body.name,
     });
 
-    // ---- письмо клиенту (подтверждение) ----
-    if (email) {
-      const clientText = `
-Hi ${firstName || ""},
+    const {
+      name,
+      email,
+      address,
+      phone,
+      service,
+      items,
+      comments,
+    } = req.body;
 
-Thank you for your booking request with Avid Carpet Cleaning.
-We received your request and will contact you within a few hours to confirm details.
+    // Собираем вложения из загруженных фото
+    const attachments = (req.files || []).map((file, index) => {
+      const ext = (file.mimetype && file.mimetype.split("/")[1]) || "jpg";
+      return {
+        filename: `photo-${index + 1}.${ext}`,
+        content: file.buffer,
+        contentType: file.mimetype,
+      };
+    });
 
-Best regards,
-Avid Carpet Cleaning
-      `;
+    const plainText = `
+New booking request
 
-      await transporter.sendMail({
-        from: `"Avid Carpet Cleaning" <${process.env.MAIL_USER}>`,
-        to: email,
-        subject: "We received your booking request",
-        text: clientText
-      });
-    }
+Name: ${name}
+Email: ${email}
+Address: ${address}
+Phone: ${phone}
+Service type: ${service}
 
-    return res.status(200).json({ success: true });
+Items to clean:
+${items}
+
+Additional comments:
+${comments || "—"}
+
+Attached photos: ${attachments.length}
+`.trim();
+
+    const htmlBody = `
+      <h2>New booking request</h2>
+      <p><b>Name:</b> ${name}</p>
+      <p><b>Email:</b> ${email}</p>
+      <p><b>Address:</b> ${address}</p>
+      <p><b>Phone:</b> ${phone}</p>
+      <p><b>Service type:</b> ${service}</p>
+      <p><b>Items to clean:</b><br>${(items || "")
+        .replace(/\n/g, "<br>")}</p>
+      <p><b>Additional comments:</b><br>${(comments || "—")
+        .replace(/\n/g, "<br>")}</p>
+      <p><b>Photos attached:</b> ${attachments.length}</p>
+    `;
+
+    const mailOptions = {
+      from: `"Avid Carpet Cleaning" <${MAIL_USER}>`,
+      to: ADMIN_EMAIL,
+      replyTo: email,
+      subject: `New booking from ${name || "client"}`,
+      text: plainText,
+      html: htmlBody,
+      attachments,
+    };
+
+    // Отправляем письмо, но не даём подвиснуть бесконечно
+    const sendPromise = transporter.sendMail(mailOptions);
+
+    // Ограничиваем ожидание, чтобы всегда ответить клиенту
+    const MAIL_TIMEOUT = 20000; // 20 секунд
+    await Promise.race([
+      sendPromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Mail timeout")), MAIL_TIMEOUT)
+      ),
+    ]);
+
+    console.log(
+      "✅ Booking processed in",
+      Date.now() - startTime,
+      "ms"
+    );
+
+    // ВАЖНО: всегда отвечаем JSON, иначе фронт будет висеть
+    res.json({ success: true });
   } catch (err) {
-    console.error("Error while handling booking:", err);
-    return res
-      .status(500)
-      .json({ success: false, error: "Internal server error" });
+    console.error("❌ Booking error:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Unknown server error",
+    });
   }
 });
 
-// ---- Запуск ----
+// ---------- Старт сервера ----------
 app.listen(PORT, () => {
   console.log(`Server started on port ${PORT}`);
 });
