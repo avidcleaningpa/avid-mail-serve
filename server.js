@@ -14,13 +14,14 @@ const allowedOrigins = [
   "http://localhost:4173",
   "http://localhost:5173",
   "https://tranquil-scone-233ac7.netlify.app",
-  "https://avidcarpetcleaning.com",        // твой домен
+  "https://avidcarpetcleaning.com",
   "https://www.avidcarpetcleaning.com",
 ];
 
 app.use(
   cors({
     origin(origin, callback) {
+      // origin может быть undefined, если тестировать из Postman и т.п.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
@@ -43,10 +44,9 @@ const upload = multer({
 
 // ------------ Конфиг для Resend -------------------------
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const ADMIN_EMAIL =
-  process.env.ADMIN_EMAIL ||
-  process.env.MAIL_USER ||
-  "bookings@avidcarpetcleaning.com"; // можно поменять на любой рабочий
+
+// основной рабочий ящик
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "booking@avidcarpetcleaning.com";
 
 if (!RESEND_API_KEY) {
   console.warn("⚠️ RESEND_API_KEY не задан в переменных окружения");
@@ -60,8 +60,8 @@ async function sendBookingEmail({ client, html, attachments }) {
 
   const payload = {
     from: `Avid Carpet Cleaning <${ADMIN_EMAIL}>`,
-    to: [ADMIN_EMAIL],                // куда приходит заявка
-    reply_to: client.email,           // ответить можно клиенту
+    to: [ADMIN_EMAIL],          // куда приходит заявка
+    reply_to: client.email,     // ответ попадает клиенту
     subject: `New booking from ${client.name}`,
     html,
     attachments: attachments.map((file) => ({
@@ -98,7 +98,7 @@ async function sendClientConfirmationEmail({ client, summaryHtml }) {
 
   const payload = {
     from: `Avid Carpet Cleaning <${ADMIN_EMAIL}>`,
-    to: [client.email],                        // клиент
+    to: [client.email],                        // письмо клиенту
     subject: "We received your booking request",
     html: summaryHtml,
   };
@@ -125,7 +125,12 @@ async function sendClientConfirmationEmail({ client, summaryHtml }) {
 
 // ================== РОУТЫ ==================
 
-// health-check
+// health-check (для прогрева Render)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// просто корень
 app.get("/", (req, res) => {
   res.send("Avid API is running");
 });
