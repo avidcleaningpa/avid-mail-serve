@@ -34,10 +34,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ------------ Multer: загрузка фото в память -------------
+// лимиты: до 10 файлов, каждый максимум 10 МБ
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // до 10 МБ на файл
+    fileSize: 10 * 1024 * 1024, // 10 МБ на файл
     files: 10,                  // до 10 файлов
   },
 });
@@ -135,44 +136,25 @@ app.get("/", (req, res) => {
   res.send("Avid API is running");
 });
 
-// ================== ОСНОВНОЙ РОУТ С ОБРАБОТКОЙ ОШИБОК MULTER ==================
-
-app.post("/api/booking", (req, res) => {
-  // отдельный вызов upload, чтобы поймать ошибки Multer
-  upload.array("photos", 10)(req, res, async (err) => {
+// основной роут с формы
+// важный момент: сначала upload.array, потом наш async (чтобы multer успел обработать файлы)
+app.post(
+  "/api/booking",
+  upload.array("photos", 10),
+  async (req, res, next) => {
     try {
-      // 1) Обработка ошибок загрузки файлов (Multer)
-      if (err) {
-        console.error("Multer error:", err);
+      const {
+        name,
+        email,
+        address,
+        phone,
+        service,
+        items,
+        comments,
+        preferredDate,  // дата из формы (name="preferredDate")
+        preferredTime,  // время из формы (name="preferredTime")
+      } = req.body;
 
-        if (err.code === "LIMIT_FILE_SIZE") {
-          return res.status(400).json({
-            success: false,
-            code: "FILE_TOO_LARGE",
-            error:
-              "One of the photos is too large. Maximum size is 10 MB per file.",
-          });
-        }
-
-        if (err.code === "LIMIT_FILE_COUNT") {
-          return res.status(400).json({
-            success: false,
-            code: "TOO_MANY_FILES",
-            error:
-              "Too many photos. You can upload up to 10 photos per booking.",
-          });
-        }
-
-        // общая ошибка Multer
-        return res.status(400).json({
-          success: false,
-          code: "UPLOAD_ERROR",
-          error: "There was a problem uploading your photos. Please try again.",
-        });
-      }
-
-      // 2) Основная логика, если с файлами всё ОК
-      const { name, email, address, phone, service, items, comments } = req.body;
       const files = req.files || [];
 
       console.log("New booking request:", {
@@ -183,29 +165,16 @@ app.post("/api/booking", (req, res) => {
         service,
         items,
         comments,
+        preferredDate,
+        preferredTime,
         filesCount: files.length,
       });
 
-      // Проверка обязательных полей
+      // проверка обязательных полей (дату/время можно сделать обязательными, если хочешь)
       if (!name || !email || !address || !phone || !service || !items) {
-        return res.status(400).json({
-          success: false,
-          code: "MISSING_FIELDS",
-          error: "Please fill in all required fields.",
-        });
-      }
-
-      // Дополнительно: можно ограничить общий размер всех файлов (например, 50 МБ)
-      const totalSize = files.reduce((sum, f) => sum + (f.size || 0), 0);
-      const maxTotalSize = 50 * 1024 * 1024; // 50 МБ суммарно
-
-      if (totalSize > maxTotalSize) {
-        return res.status(400).json({
-          success: false,
-          code: "TOTAL_SIZE_TOO_LARGE",
-          error:
-            "Total size of all photos is too large. Please reduce the number of photos or their size.",
-        });
+        return res
+          .status(400)
+          .json({ success: false, error: "Missing required fields" });
       }
 
       // HTML для письма админу
@@ -217,6 +186,8 @@ app.post("/api/booking", (req, res) => {
         <p><b>Address:</b> ${address}</p>
         <p><b>Service:</b> ${service}</p>
         <p><b>Items:</b> ${items}</p>
+        <p><b>Preferred date:</b> ${preferredDate || "-"}</p>
+        <p><b>Preferred time:</b> ${preferredTime || "-"}</p>
         <p><b>Comments:</b> ${comments || "-"}</p>
         <p><b>Photos attached:</b> ${files.length}</p>
       `;
@@ -229,6 +200,8 @@ app.post("/api/booking", (req, res) => {
         <p><b>Service:</b> ${service}</p>
         <p><b>Items:</b> ${items}</p>
         <p><b>Address:</b> ${address}</p>
+        <p><b>Preferred date:</b> ${preferredDate || "-"}</p>
+        <p><b>Preferred time:</b> ${preferredTime || "-"}</p>
         <p><b>Phone:</b> ${phone}</p>
         <p><b>Additional comments:</b> ${comments || "-"}</p>
         <p>If you didn’t make this request, please reply to this email.</p>
@@ -249,15 +222,36 @@ app.post("/api/booking", (req, res) => {
 
       // ответ фронту
       return res.json({ success: true });
-    } catch (error) {
-      console.error("Booking error:", error);
-      return res.status(500).json({
-        success: false,
-        code: "SERVER_ERROR",
-        error: "Something went wrong while sending your booking. Please try again.",
-      });
+    } catch (err) {
+      console.error("Booking error:", err);
+      // пробрасываем в общий обработчик ошибок ниже
+      return next(err);
     }
-  });
+  }
+);
+
+// ================== ОБРАБОТКА ОШИБОК ==================
+
+// Красивые ответы, если пользователь загрузил слишком большие/много файлов
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    let message = "File upload error";
+
+    if (err.code === "LIMIT_FILE_SIZE") {
+      message =
+        "One of the photos is too large. Max size is 10 MB per photo.";
+    } else if (err.code === "LIMIT_FILE_COUNT") {
+      message = "You can upload up to 10 photos.";
+    }
+
+    console.error("Multer error:", err);
+    return res.status(400).json({ success: false, error: message });
+  }
+
+  console.error("Unhandled error:", err);
+  return res
+    .status(500)
+    .json({ success: false, error: "Server error. Please try again later." });
 });
 
 // ================== ЗАПУСК СЕРВЕРА ==================
